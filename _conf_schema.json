@@ -1,0 +1,164 @@
+{
+  "plugin_enabled": {
+    "description": "启用插件",
+    "hint": "关闭后不捕获对话、不注入记忆、不自动整理。",
+    "type": "bool",
+    "default": true
+  },
+  "provider_settings": {
+    "description": "模型设置",
+    "hint": "LLM 用于自动整理记忆；Embedding 用于语义召回。Embedding 留空时自动使用第一个可用的 Embedding Provider。",
+    "type": "object",
+    "items": {
+      "llm_provider_id": {
+        "description": "LLM Provider ID",
+        "hint": "用于对话总结、记忆分层和剧情整理。留空使用默认 Provider。",
+        "type": "string",
+        "_special": "select_provider",
+        "default": ""
+      },
+      "embedding_provider_id": {
+        "description": "Embedding Provider ID",
+        "hint": "用于语义向量召回和向量索引。留空自动选择第一个可用的 Embedding Provider；没有配置时自动降级为关键词检索。",
+        "type": "string",
+        "default": ""
+      }
+    }
+  },
+  "recall": {
+    "description": "智能回忆与注入",
+    "hint": "控制每次回复前检索并注入的记忆数量和长度。默认偏效果优先，适合长剧情和长期陪伴。",
+    "type": "object",
+    "items": {
+      "top_k": {
+        "description": "单次召回数量",
+        "hint": "每次根据当前消息检索多少条普通记忆。设为 0 可关闭自动召回，但锁定记忆和剧情状态仍可注入。",
+        "type": "int",
+        "default": 8
+      },
+      "locked_limit": {
+        "description": "锁定记忆注入数量",
+        "hint": "每轮最多注入多少条锁定记忆。设为 0 可关闭锁定记忆注入。",
+        "type": "int",
+        "default": 10
+      },
+      "enable_vector_retrieval": {
+        "description": "启用语义向量召回",
+        "hint": "开启后会用 AstrBot 的 Embedding Provider 做语义检索，比单纯关键词更适合中文长剧情和含蓄表达。",
+        "type": "bool",
+        "default": true
+      },
+      "max_injection_chars": {
+        "description": "普通记忆最大注入字数",
+        "hint": "防止长期记忆占用过多上下文。效果优先可保持 3000 以上。",
+        "type": "int",
+        "default": 3200
+      },
+      "max_locked_chars": {
+        "description": "锁定记忆最大注入字数",
+        "hint": "锁定记忆会被高优先级注入，建议只放真正必须遵守的规则。",
+        "type": "int",
+        "default": 2400
+      },
+      "max_story_state_chars": {
+        "description": "剧情状态最大注入字数",
+        "hint": "结构化维护当前阶段、关系、冲突和后续线索，长篇剧情建议保持开启。",
+        "type": "int",
+        "default": 1800
+      },
+      "inject_locked_to_system_prompt": {
+        "description": "锁定记忆注入 System Prompt",
+        "hint": "开启后锁定记忆会追加到 system_prompt，优先级更高。关闭后改为普通临时上下文注入。",
+        "type": "bool",
+        "default": true
+      },
+      "always_include_story_frame": {
+        "description": "始终补充剧情框架",
+        "hint": "开启后每轮会额外带上最近剧情框架和剧情总结，降低长篇剧情跑偏概率。",
+        "type": "bool",
+        "default": true
+      },
+      "fallback_to_important_memories": {
+        "description": "无命中时兜底注入重要记忆",
+        "hint": "当前消息没有搜到相关内容时，仍补充少量核心记忆和备忘录，提升陪伴稳定性。",
+        "type": "bool",
+        "default": true
+      },
+      "include_global_memories": {
+        "description": "包含全局记忆",
+        "hint": "保留给后续跨会话/全局规则使用。当前手动命令默认写入当前会话。",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "memory_generation": {
+    "description": "自动整理",
+    "hint": "控制何时把对话整理成长期记忆、剧情摘要和结构化剧情状态。",
+    "type": "object",
+    "items": {
+      "summary_trigger_messages": {
+        "description": "整理触发消息数",
+        "hint": "未整理消息达到该数量后自动调用 LLM 总结。效果优先建议 10-16。",
+        "type": "int",
+        "default": 12
+      },
+      "summary_window_messages": {
+        "description": "单次整理窗口",
+        "hint": "每次最多整理多少条消息。窗口越大，剧情归纳越完整，但消耗更多模型上下文。",
+        "type": "int",
+        "default": 80
+      },
+      "deduplicate_memories": {
+        "description": "自动去重合并记忆",
+        "hint": "开启后相似记忆会合并补充，不会无限堆重复条目。",
+        "type": "bool",
+        "default": true
+      },
+      "dedup_similarity_threshold": {
+        "description": "去重相似度阈值",
+        "hint": "越低越容易合并，越高越保守。建议 0.80-0.88。",
+        "type": "float",
+        "default": 0.82
+      },
+      "allow_auto_locked_memory": {
+        "description": "允许自动生成锁定记忆",
+        "hint": "默认关闭。开启后模型可把明确的绝对禁止/必须遵守内容自动写成锁定记忆；关闭时会降级为核心记忆并标记为锁定候选。",
+        "type": "bool",
+        "default": false
+      }
+    }
+  },
+  "session_capture": {
+    "description": "会话缓存",
+    "hint": "控制插件内部保存多少原始对话用于自动整理。",
+    "type": "object",
+    "items": {
+      "capture_user_messages": {
+        "description": "捕获用户消息",
+        "hint": "关闭后只记录模型回复，通常不建议关闭。",
+        "type": "bool",
+        "default": true
+      },
+      "max_messages_per_session": {
+        "description": "单会话消息缓存上限",
+        "hint": "超过后会删除最旧的原始消息；已整理出的长期记忆不受影响。",
+        "type": "int",
+        "default": 1500
+      }
+    }
+  },
+  "storage": {
+    "description": "存储与导出",
+    "hint": "SQLite 数据库位于 AstrBot 插件数据目录。导出目录可自定义。",
+    "type": "object",
+    "items": {
+      "export_dir": {
+        "description": "导出目录",
+        "hint": "留空时 Windows 下优先导出到 D:/创建文件/astrbot_layered_memory_exports，其他环境导出到插件数据目录。",
+        "type": "string",
+        "default": ""
+      }
+    }
+  }
+}
