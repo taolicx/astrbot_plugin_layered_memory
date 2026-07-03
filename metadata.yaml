@@ -3,7 +3,7 @@ display_name: 分层长期记忆与剧情延续
 author: Codex
 description: 为 AstrBot 提供分层长期记忆、语义向量召回、自动去重合并、结构化剧情状态和剧情总结。
 repo: "https://github.com/taolicx/astrbot_plugin_layered_memory"
-version: 0.3.0
+version: 0.4.0
 category: AI 增强
 tags:
   - 长期记忆

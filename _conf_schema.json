@@ -135,6 +135,25 @@
       }
     }
   },
+  "agent_tools": {
+    "description": "主动记忆工具",
+    "hint": "注册给 LLM/Agent 使用的内部工具，不是给用户日常手动操作的指令。",
+    "type": "object",
+    "items": {
+      "enable_recall_tool": {
+        "description": "启用主动回忆工具",
+        "hint": "开启后模型可以在需要旧信息、偏好、约定、剧情线索时主动查询长期记忆。",
+        "type": "bool",
+        "default": true
+      },
+      "enable_memorize_tool": {
+        "description": "启用主动写入工具",
+        "hint": "开启后模型可以在用户明确要求记住，或出现稳定长期事实时主动写入记忆。写入仍会自动去重合并。",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
   "session_capture": {
     "description": "会话缓存",
     "hint": "控制插件内部保存多少原始对话用于自动整理。",

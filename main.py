@@ -89,7 +89,7 @@ def _plain(text: str) -> str:
     PLUGIN_NAME,
     "Codex",
     "分层长期记忆与剧情延续插件：核心记忆、备忘录、锁定记忆、记忆日志、智能回忆、剧情框架与剧情总结。",
-    "0.3.0",
+    "0.4.0",
 )
 class LayeredMemoryPlugin(Star):
     def __init__(self, context: Context, config: dict[str, Any]):
@@ -511,6 +511,137 @@ class LayeredMemoryPlugin(Star):
             )
         )
 
+    # -------------------- Agent memory tools --------------------
+
+    @filter.llm_tool(name="recall_layered_memory")
+    async def recall_layered_memory(self, event: AstrMessageEvent, query: str, k: int = 5) -> str:
+        """主动查询长期记忆。当用户询问过去信息、旧约定、偏好、剧情线索，或当前上下文不足以判断指代时使用。
+
+        Args:
+            query(str): 精简的查询关键词。优先使用主题、人物、偏好、约定、剧情线索，不要直接复制整段用户消息。
+            k(int): 最多返回多少条记忆，通常 3 到 6 条即可。
+        """
+        if not bool(_cfg(self.config, "agent_tools.enable_recall_tool", True)):
+            return self._json_tool_result({"ok": False, "error": "recall tool disabled", "results": []})
+        cleaned_query = _plain(query)
+        if not cleaned_query:
+            return self._json_tool_result({"ok": False, "error": "query is empty", "results": []})
+        session_id = getattr(event, "unified_msg_origin", "") or ""
+        try:
+            top_k = int(k or 5)
+        except (TypeError, ValueError):
+            top_k = 5
+        top_k = max(1, min(12, top_k))
+        try:
+            keyword_entries = self.store.search_memories(
+                cleaned_query,
+                session_id=session_id,
+                top_k=top_k * 3,
+                categories=["core", "memo", "log", "story_frame", "story_summary", "locked"],
+                include_global=bool(_cfg(self.config, "recall.include_global_memories", True)),
+            )
+            vector_entries = await self._vector_recall(cleaned_query, session_id=session_id, top_k=top_k * 3)
+            entries = self.store.fuse_retrieval_results(
+                [keyword_entries, vector_entries],
+                top_k=top_k,
+                diversity_threshold=float(_cfg(self.config, "recall.mmr_similarity_threshold", 0.82) or 0.82),
+            )
+            return self._json_tool_result(
+                {
+                    "ok": True,
+                    "query": cleaned_query,
+                    "count": len(entries),
+                    "results": [self._entry_tool_payload(entry) for entry in entries],
+                }
+            )
+        except Exception as exc:
+            logger.error("[LayeredMemory] 主动回忆工具失败：%s", exc, exc_info=True)
+            return self._json_tool_result({"ok": False, "error": "internal_error", "results": []})
+
+    @filter.llm_tool(name="memorize_layered_memory")
+    async def memorize_layered_memory(
+        self,
+        event: AstrMessageEvent,
+        memory: str,
+        category: str = "core",
+        importance: float = 0.75,
+        tags: list[str] | None = None,
+        key_facts: list[str] | None = None,
+        reason: str = "",
+    ) -> str:
+        """主动写入长期记忆。仅在用户明确要求记住，或出现稳定偏好、身份事实、长期约定、重要剧情状态时使用。
+
+        Args:
+            memory(str): 要保存的简洁事实记忆，不要复制整段对话。
+            category(str): 记忆分类，可用 core、memo、log、story_frame、story_summary；除非非常确定，不要写 locked。
+            importance(float): 重要度，0.0 到 1.0；长期偏好、约定、身份事实、主线剧情应更高。
+            tags(list[str]): 关键词标签，最多 8 个。
+            key_facts(list[str]): 支撑这条记忆的独立关键事实，最多 8 条。
+            reason(str): 为什么需要记住，简短说明即可。
+        """
+        if not bool(_cfg(self.config, "agent_tools.enable_memorize_tool", True)):
+            return self._json_tool_result({"ok": False, "error": "memorize tool disabled"})
+        cleaned_memory = str(memory or "").strip()
+        if not cleaned_memory:
+            return self._json_tool_result({"ok": False, "error": "memory is empty"})
+        normalized = normalize_category(category)
+        locked = normalized == "locked"
+        if locked and not bool(_cfg(self.config, "memory_generation.allow_auto_locked_memory", False)):
+            normalized = "core"
+            locked = False
+            tags = [*ensure_str_list(tags, limit=7), "锁定候选"]
+        session_id = getattr(event, "unified_msg_origin", "") or ""
+        metadata = {
+            "schema": "layered-v2",
+            "source_field": "agent_tool",
+            "canonical_summary": cleaned_memory[:1600],
+            "persona_summary": cleaned_memory[:1600],
+            "key_facts": ensure_str_list(key_facts, limit=8),
+            "summary_quality": "normal",
+            "source_window": {
+                "session_id": session_id,
+                "triggered_by": "agent_tool",
+                "tool_name": "memorize_layered_memory",
+            },
+        }
+        cleaned_reason = str(reason or "").strip()
+        if cleaned_reason:
+            metadata["memorize_reason"] = cleaned_reason[:240]
+        entry = MemoryEntry(
+            session_id=session_id,
+            persona_id=await self._persona_id(event),
+            category=normalized,
+            title="主动记忆",
+            content=cleaned_memory[:1600],
+            importance=clamp01(importance, 0.75),
+            confidence=0.9,
+            tags=ensure_str_list(tags, limit=8),
+            metadata=metadata,
+            source="agent_tool",
+            locked=locked,
+        )
+        try:
+            memory_id, was_merged = self.store.add_or_merge_memory(
+                entry,
+                dedup_enabled=bool(_cfg(self.config, "memory_generation.deduplicate_memories", True)),
+                threshold=float(_cfg(self.config, "memory_generation.dedup_similarity_threshold", 0.82) or 0.82),
+            )
+            stored_entry = self.store.get_memory(memory_id)
+            if stored_entry:
+                self._schedule_vector_index(memory_id, stored_entry)
+            return self._json_tool_result(
+                {
+                    "ok": True,
+                    "id": memory_id,
+                    "merged": was_merged,
+                    "category": normalized,
+                    "content": stored_entry.content if stored_entry else cleaned_memory,
+                }
+            )
+        except Exception as exc:
+            logger.error("[LayeredMemory] 主动记忆工具失败：%s", exc, exc_info=True)
+            return self._json_tool_result({"ok": False, "error": "internal_error"})
+
     # -------------------- Helpers --------------------
 
     def _manual_add(
@@ -750,6 +881,26 @@ class LayeredMemoryPlugin(Star):
                 merged.append(entry)
                 seen.add(entry.id)
         return merged
+
+    @staticmethod
+    def _json_tool_result(data: dict[str, Any]) -> str:
+        return json.dumps(data, ensure_ascii=False, default=str)
+
+    @staticmethod
+    def _entry_tool_payload(entry: MemoryEntry) -> dict[str, Any]:
+        metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+        return {
+            "id": entry.id,
+            "category": entry.category,
+            "title": entry.title,
+            "content": metadata.get("persona_summary") or entry.content,
+            "canonical_summary": metadata.get("canonical_summary") or entry.content,
+            "importance": entry.importance,
+            "confidence": entry.confidence,
+            "tags": entry.tags,
+            "score": round(float(entry.score or 0.0), 4),
+            "source": entry.source,
+        }
 
     @staticmethod
     def _looks_like_error(text: str) -> bool:

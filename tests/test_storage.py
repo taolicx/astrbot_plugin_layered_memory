@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from core.formatter import format_recall_context
 from core.processor import LayeredMemoryProcessor
 from core.schema import MemoryEntry
 from core.storage import LayeredMemoryStore
@@ -324,6 +325,46 @@ class StorageTests(unittest.TestCase):
                 result = store.maintain_memories("session-1", stale_days=30, preview=False)
                 self.assertEqual(result["disabled"], 1)
                 self.assertFalse(store.get_memory(memory_id).enabled)
+            finally:
+                store.close()
+
+    def test_simulated_active_memory_dialog_flow(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LayeredMemoryStore(Path(temp_dir) / "memory.db")
+            try:
+                memory_id, merged = store.add_or_merge_memory(
+                    MemoryEntry(
+                        session_id="session-1",
+                        category="core",
+                        title="主动记忆",
+                        content="用户希望被称呼为林先生。",
+                        importance=0.86,
+                        confidence=0.9,
+                        tags=["称呼", "偏好"],
+                        metadata={
+                            "schema": "layered-v2",
+                            "source_field": "agent_tool",
+                            "canonical_summary": "用户希望被称呼为林先生。",
+                            "persona_summary": "以后自然称呼用户为林先生。",
+                            "key_facts": ["称呼用户为林先生"],
+                            "summary_quality": "normal",
+                            "source_window": {
+                                "session_id": "session-1",
+                                "triggered_by": "agent_tool",
+                                "tool_name": "memorize_layered_memory",
+                            },
+                        },
+                        source="agent_tool",
+                    )
+                )
+                self.assertFalse(merged)
+                self.assertGreater(memory_id, 0)
+
+                found = store.search_memories("称呼 林先生", session_id="session-1", top_k=5)
+                self.assertEqual(found[0].id, memory_id)
+
+                context = format_recall_context(found, max_chars=1000)
+                self.assertIn("以后自然称呼用户为林先生", context)
             finally:
                 store.close()
 
