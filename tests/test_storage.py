@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from core.processor import LayeredMemoryProcessor
 from core.schema import MemoryEntry
 from core.storage import LayeredMemoryStore
 
@@ -210,6 +211,119 @@ class StorageTests(unittest.TestCase):
                 self.assertEqual(state["current_stage"], "城堡门口对峙")
                 self.assertIn("守卫开始怀疑主角", state["important_events"])
                 self.assertEqual(state["next_hooks"].count("调查塔楼"), 1)
+            finally:
+                store.close()
+
+    def test_rrf_fusion_and_mmr_dedup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LayeredMemoryStore(Path(temp_dir) / "memory.db")
+            try:
+                first_id = store.add_memory(
+                    MemoryEntry(
+                        session_id="session-1",
+                        category="core",
+                        title="称呼",
+                        content="用户希望被称呼为林先生。",
+                        importance=0.9,
+                    )
+                )
+                duplicate_id = store.add_memory(
+                    MemoryEntry(
+                        session_id="session-1",
+                        category="core",
+                        title="称呼偏好",
+                        content="用户希望被叫林先生。",
+                        importance=0.8,
+                    )
+                )
+                story_id = store.add_memory(
+                    MemoryEntry(
+                        session_id="session-1",
+                        category="story_frame",
+                        title="城堡",
+                        content="当前剧情停在城堡门口，守卫正在盘问。",
+                        importance=0.85,
+                    )
+                )
+
+                first = store.get_memory(first_id)
+                duplicate = store.get_memory(duplicate_id)
+                story = store.get_memory(story_id)
+                fused = store.fuse_retrieval_results(
+                    [[first, story], [duplicate, first]],
+                    top_k=3,
+                    diversity_threshold=0.35,
+                )
+                self.assertEqual(fused[0].id, first_id)
+                self.assertIn(story_id, {item.id for item in fused})
+                self.assertNotIn(duplicate_id, {item.id for item in fused})
+            finally:
+                store.close()
+
+    def test_processor_dual_channel_metadata_and_quality(self):
+        processor = LayeredMemoryProcessor()
+        entries = processor._payload_to_entries(
+            {
+                "core_memories": [
+                    {
+                        "title": "称呼",
+                        "content": "用户希望被称呼为林先生。",
+                        "canonical_summary": "用户希望被称呼为林先生。",
+                        "persona_summary": "以后自然称呼用户为林先生。",
+                        "key_facts": ["称呼用户为林先生"],
+                        "importance": 0.8,
+                        "confidence": 0.9,
+                        "tags": ["称呼"],
+                    },
+                    {
+                        "title": "泛泛摘要",
+                        "content": "用户聊了一些事情。",
+                        "importance": 0.5,
+                    },
+                ]
+            },
+            session_id="session-1",
+            persona_id="persona-1",
+            fallback_excerpt="excerpt",
+            source_window={"session_id": "session-1", "start_id": 1, "end_id": 2, "message_count": 2},
+        )
+        self.assertEqual(len(entries), 2)
+        good = entries[0]
+        self.assertEqual(good.metadata["schema"], "layered-v2")
+        self.assertEqual(good.metadata["persona_summary"], "以后自然称呼用户为林先生。")
+        self.assertEqual(good.metadata["key_facts"], ["称呼用户为林先生"])
+        self.assertEqual(good.metadata["summary_quality"], "normal")
+        self.assertEqual(good.metadata["source_window"]["end_id"], 2)
+
+        low = entries[1]
+        self.assertEqual(low.metadata["summary_quality"], "low")
+        self.assertLessEqual(low.confidence, 0.45)
+
+    def test_maintenance_disables_old_low_quality_auto_memory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LayeredMemoryStore(Path(temp_dir) / "memory.db")
+            try:
+                memory_id = store.add_memory(
+                    MemoryEntry(
+                        session_id="session-1",
+                        category="log",
+                        title="泛泛摘要",
+                        content="用户聊了一些事情。",
+                        importance=0.1,
+                        confidence=0.3,
+                        metadata={"summary_quality": "low"},
+                        source="auto_summary",
+                        created_at="2020-01-01T00:00:00",
+                        updated_at="2020-01-01T00:00:00",
+                    )
+                )
+                preview = store.maintain_memories("session-1", stale_days=30, preview=True)
+                self.assertEqual(preview["candidates"], 1)
+                self.assertTrue(store.get_memory(memory_id).enabled)
+
+                result = store.maintain_memories("session-1", stale_days=30, preview=False)
+                self.assertEqual(result["disabled"], 1)
+                self.assertFalse(store.get_memory(memory_id).enabled)
             finally:
                 store.close()
 

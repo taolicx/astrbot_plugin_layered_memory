@@ -33,7 +33,7 @@ def format_recall_context(entries: list[MemoryEntry], max_chars: int = 2200) -> 
         lines.append(f"\n[{MEMORY_CATEGORIES.get(category, category)}]")
         for item in items:
             title = f"{item.title}: " if item.title else ""
-            lines.append(f"- #{item.id} {title}{item.content}")
+            lines.append(f"- #{item.id} {title}{_entry_injection_text(item)}")
     lines.append(INJECTION_FOOTER)
     text = "\n".join(lines)
     if len(text) <= max_chars:
@@ -109,3 +109,12 @@ def format_entries(entries: list[MemoryEntry]) -> str:
     if not entries:
         return "没有找到记忆。"
     return "\n".join(format_entry_line(entry) for entry in entries)
+
+
+def _entry_injection_text(entry: MemoryEntry) -> str:
+    persona_summary = ""
+    if isinstance(entry.metadata, dict):
+        raw = entry.metadata.get("persona_summary")
+        if isinstance(raw, str):
+            persona_summary = raw.strip()
+    return persona_summary or entry.content

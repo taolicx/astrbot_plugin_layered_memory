@@ -84,6 +84,12 @@
         "type": "bool",
         "default": true
       },
+      "mmr_similarity_threshold": {
+        "description": "召回去重相似度阈值",
+        "hint": "召回结果超过该相似度会被视为重复，只保留排序更靠前的一条。越低越激进，越高越保守。",
+        "type": "float",
+        "default": 0.82
+      },
       "include_global_memories": {
         "description": "包含全局记忆",
         "hint": "保留给后续跨会话/全局规则使用。当前手动命令默认写入当前会话。",

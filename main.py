@@ -89,7 +89,7 @@ def _plain(text: str) -> str:
     PLUGIN_NAME,
     "Codex",
     "分层长期记忆与剧情延续插件：核心记忆、备忘录、锁定记忆、记忆日志、智能回忆、剧情框架与剧情总结。",
-    "0.2.1",
+    "0.3.0",
 )
 class LayeredMemoryPlugin(Star):
     def __init__(self, context: Context, config: dict[str, Any]):
@@ -167,15 +167,20 @@ class LayeredMemoryPlugin(Star):
 
             top_k = _safe_int(_cfg(self.config, "recall.top_k", 6), 6, 0, 20)
             if query and top_k > 0:
-                entries = self.store.search_memories(
+                candidate_k = max(top_k * 3, top_k)
+                keyword_entries = self.store.search_memories(
                     query,
                     session_id=session_id,
-                    top_k=top_k,
+                    top_k=candidate_k,
                     categories=["core", "memo", "log", "story_frame", "story_summary"],
                     include_global=bool(_cfg(self.config, "recall.include_global_memories", True)),
                 )
-                vector_entries = await self._vector_recall(query, session_id=session_id, top_k=top_k)
-                entries = self._merge_entries(entries, vector_entries)
+                vector_entries = await self._vector_recall(query, session_id=session_id, top_k=candidate_k)
+                entries = self.store.fuse_retrieval_results(
+                    [keyword_entries, vector_entries],
+                    top_k=max(top_k, 4),
+                    diversity_threshold=float(_cfg(self.config, "recall.mmr_similarity_threshold", 0.82) or 0.82),
+                )
                 if bool(_cfg(self.config, "recall.always_include_story_frame", True)):
                     entries = self._merge_entries(
                         entries,
@@ -187,6 +192,11 @@ class LayeredMemoryPlugin(Star):
                         self.store.list_memories(session_id, category="core", limit=2),
                         self.store.list_memories(session_id, category="memo", limit=2),
                     )
+                entries = self.store.diversify_entries(
+                    entries,
+                    limit=max(top_k, 4),
+                    threshold=float(_cfg(self.config, "recall.mmr_similarity_threshold", 0.82) or 0.82),
+                )
                 recall_context = format_recall_context(
                     entries[: max(top_k, 4)],
                     max_chars=_safe_int(_cfg(self.config, "recall.max_injection_chars", 2200), 2200, 500, 8000),
@@ -299,6 +309,8 @@ class LayeredMemoryPlugin(Star):
         embedding_provider = self._get_embedding_provider()
         lines.append(f"- 语义向量：{'可用' if embedding_provider else '未配置，已降级关键词检索'}")
         lines.append(f"- 向量索引：{stats['vectors']} 条")
+        if stats.get("low_quality"):
+            lines.append(f"- 待维护低质量记忆：{stats['low_quality']} 条")
         lines.append(f"- 剧情状态：{'已维护' if stats['story_state'] else '暂无'}")
         for category, name in MEMORY_CATEGORIES.items():
             lines.append(f"- {name}：{stats['by_category'].get(category, 0)} 条")
@@ -452,6 +464,20 @@ class LayeredMemoryPlugin(Star):
         yield event.plain_result(f"检索索引已重建：{index_count} 条；已安排 {scheduled} 条记忆补建语义向量。")
 
     @admin_permission
+    @rmem.command("maintain")
+    async def maintain(self, event: AstrMessageEvent, mode: str = "preview", days: int = 60) -> AsyncGenerator[MessageEventResult, None]:
+        preview = str(mode or "preview").lower() not in {"exec", "执行", "run"}
+        result = self.store.maintain_memories(
+            getattr(event, "unified_msg_origin", "") or "",
+            stale_days=max(7, min(365, int(days or 60))),
+            preview=preview,
+        )
+        action = "预览" if preview else "已执行"
+        yield event.plain_result(
+            f"记忆维护{action}：候选 {result['candidates']} 条，降权 {result['decayed']} 条，停用 {result['disabled']} 条。"
+        )
+
+    @admin_permission
     @rmem.command("state")
     async def story_state(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         text = format_story_state(self.store.get_story_state(getattr(event, "unified_msg_origin", "") or ""), max_chars=5000)
@@ -549,7 +575,21 @@ class LayeredMemoryPlugin(Star):
         provider = self._get_embedding_provider()
         if provider is None:
             return
-        text = f"{entry.title}\n{entry.content}\n{' '.join(entry.tags)}".strip()
+        metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+        key_facts = metadata.get("key_facts") if isinstance(metadata.get("key_facts"), list) else []
+        persona_summary = metadata.get("persona_summary") if isinstance(metadata.get("persona_summary"), str) else ""
+        canonical_summary = metadata.get("canonical_summary") if isinstance(metadata.get("canonical_summary"), str) else ""
+        text = "\n".join(
+            str(part).strip()
+            for part in [
+                entry.title,
+                canonical_summary or entry.content,
+                persona_summary,
+                " ".join(str(item) for item in key_facts),
+                " ".join(entry.tags),
+            ]
+            if str(part or "").strip()
+        )
         if not text:
             return
         try:

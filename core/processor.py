@@ -10,7 +10,7 @@ from typing import Any
 from .schema import LayeredSummary, MemoryEntry, clamp01, ensure_str_list, normalize_category
 
 
-SUMMARY_SCHEMA_VERSION = "layered-v1"
+SUMMARY_SCHEMA_VERSION = "layered-v2"
 
 
 class LayeredMemoryProcessor:
@@ -52,6 +52,7 @@ class LayeredMemoryProcessor:
         if not messages:
             return LayeredSummary()
         conversation = self._format_messages(messages)
+        source_window = self._source_window(messages, session_id=session_id)
         prompt = self._build_prompt(conversation, is_group=is_group)
         system_prompt = self._build_system_prompt(persona_id=persona_id)
         text = await self._call_llm(prompt, system_prompt, session_id=session_id)
@@ -61,6 +62,7 @@ class LayeredMemoryProcessor:
             session_id=session_id,
             persona_id=persona_id,
             fallback_excerpt=conversation[:400],
+            source_window=source_window,
         )
         story_state = self._payload_story_state(payload)
         return LayeredSummary(entries=entries, story_state=story_state)
@@ -101,22 +103,22 @@ class LayeredMemoryProcessor:
 输出 JSON，字段必须是：
 {{
   "core_memories": [
-    {{"title": "短标题", "content": "用户偏好/重要经历/约定/角色核心设定/关键转折", "importance": 0.0-1.0, "tags": ["关键词"]}}
+    {{"title": "短标题", "content": "用户偏好/重要经历/约定/角色核心设定/关键转折", "canonical_summary": "事实化摘要", "persona_summary": "适合注入给角色自然理解的摘要", "key_facts": ["独立关键事实"], "importance": 0.0-1.0, "confidence": 0.0-1.0, "tags": ["关键词"]}}
   ],
   "memos": [
-    {{"title": "短标题", "content": "称呼要求、说话方式、待办、小设定、后续线索", "importance": 0.0-1.0, "tags": ["关键词"]}}
+    {{"title": "短标题", "content": "称呼要求、说话方式、待办、小设定、后续线索", "canonical_summary": "事实化摘要", "persona_summary": "适合注入给角色自然理解的摘要", "key_facts": ["独立关键事实"], "importance": 0.0-1.0, "confidence": 0.0-1.0, "tags": ["关键词"]}}
   ],
   "locked_memories": [
-    {{"title": "短标题", "content": "只有明确出现绝对禁止、必须遵守、不可更改、严重雷点时才填写", "importance": 0.0-1.0, "tags": ["关键词"]}}
+    {{"title": "短标题", "content": "只有明确出现绝对禁止、必须遵守、不可更改、严重雷点时才填写", "canonical_summary": "事实化摘要", "persona_summary": "适合注入给角色自然理解的摘要", "key_facts": ["独立关键事实"], "importance": 0.0-1.0, "confidence": 0.0-1.0, "tags": ["关键词"]}}
   ],
   "memory_logs": [
-    {{"title": "短标题", "content": "最近发生的剧情/聊天概要/新人物/有趣细节", "importance": 0.0-1.0, "tags": ["关键词"]}}
+    {{"title": "短标题", "content": "最近发生的剧情/聊天概要/新人物/有趣细节", "canonical_summary": "事实化摘要", "persona_summary": "适合注入给角色自然理解的摘要", "key_facts": ["独立关键事实"], "importance": 0.0-1.0, "confidence": 0.0-1.0, "tags": ["关键词"]}}
   ],
   "story_frames": [
-    {{"title": "短标题", "content": "当前剧情阶段、世界观、已发生事件、关系变化、未解决冲突、目标、转折点", "importance": 0.0-1.0, "tags": ["关键词"]}}
+    {{"title": "短标题", "content": "当前剧情阶段、世界观、已发生事件、关系变化、未解决冲突、目标、转折点", "canonical_summary": "事实化摘要", "persona_summary": "适合注入给角色自然理解的摘要", "key_facts": ["独立关键事实"], "importance": 0.0-1.0, "confidence": 0.0-1.0, "tags": ["关键词"]}}
   ],
   "story_summaries": [
-    {{"title": "短标题", "content": "阶段性剧情摘要", "importance": 0.0-1.0, "tags": ["关键词"]}}
+    {{"title": "短标题", "content": "阶段性剧情摘要", "canonical_summary": "事实化摘要", "persona_summary": "适合注入给角色自然理解的摘要", "key_facts": ["独立关键事实"], "importance": 0.0-1.0, "confidence": 0.0-1.0, "tags": ["关键词"]}}
   ],
   "story_state": {{
     "current_stage": "当前剧情阶段，一句话",
@@ -137,6 +139,9 @@ class LayeredMemoryProcessor:
 - 普通闲聊、客套、模型自己的临时措辞不要写入。
 - 锁定记忆门槛最高：只有用户清晰表达“绝对不能/必须/永远/禁止/雷点/底线”等强约束时才写。
 - 剧情内容要保留主线和未解决线索，避免只写泛泛摘要。
+- canonical_summary 用客观事实写；persona_summary 用更自然、更适合角色理解的表达，但不要添油加醋。
+- key_facts 写成可独立检索的事实短句，避免泛泛而谈。
+- confidence 表示证据明确度；推断、模糊、玩笑内容要降低 confidence。
 - story_state 只写稳定剧情状态，不要写普通闲聊；没有剧情就留空对象或空数组。
 
 对话：
@@ -185,6 +190,7 @@ class LayeredMemoryProcessor:
         session_id: str,
         persona_id: str,
         fallback_excerpt: str,
+        source_window: dict[str, Any],
     ) -> list[MemoryEntry]:
         mapping = {
             "core_memories": "core",
@@ -202,9 +208,15 @@ class LayeredMemoryProcessor:
             for raw in values[:3]:
                 if not isinstance(raw, dict):
                     continue
-                content = str(raw.get("content") or raw.get("summary") or "").strip()
+                content = str(raw.get("canonical_summary") or raw.get("content") or raw.get("summary") or "").strip()
                 if not content:
                     continue
+                persona_summary = str(raw.get("persona_summary") or raw.get("content") or content).strip()
+                key_facts = ensure_str_list(raw.get("key_facts"), limit=8)
+                quality = self._validate_entry_quality(content, key_facts)
+                confidence = clamp01(raw.get("confidence"), 0.78)
+                if quality == "low":
+                    confidence = min(confidence, 0.45)
                 actual_category = normalize_category(category)
                 locked = actual_category == "locked"
                 if locked and not self.allow_auto_locked:
@@ -222,18 +234,63 @@ class LayeredMemoryProcessor:
                         title=str(raw.get("title") or "").strip()[:80],
                         content=content[:1600],
                         importance=clamp01(raw.get("importance"), 0.55),
-                        confidence=0.78,
+                        confidence=confidence,
                         tags=tags,
                         metadata={
                             "schema": SUMMARY_SCHEMA_VERSION,
                             "source_field": field,
                             "fallback_excerpt": fallback_excerpt,
+                            "canonical_summary": content[:1600],
+                            "persona_summary": persona_summary[:1600],
+                            "key_facts": key_facts,
+                            "summary_quality": quality,
+                            "source_window": source_window,
                         },
                         source="auto_summary",
                         locked=locked,
                     )
                 )
         return entries
+
+    @staticmethod
+    def _source_window(messages: list[dict[str, Any]], *, session_id: str) -> dict[str, Any]:
+        ids = []
+        times = []
+        for item in messages:
+            try:
+                ids.append(int(item.get("id")))
+            except (TypeError, ValueError):
+                pass
+            created_at = str(item.get("created_at") or "")
+            if created_at:
+                times.append(created_at)
+        return {
+            "session_id": session_id,
+            "start_id": min(ids) if ids else None,
+            "end_id": max(ids) if ids else None,
+            "message_count": len(messages),
+            "start_time": times[0] if times else "",
+            "end_time": times[-1] if times else "",
+        }
+
+    @staticmethod
+    def _validate_entry_quality(content: str, key_facts: list[str]) -> str:
+        text = re.sub(r"\s+", "", content or "")
+        if len(text) < 8:
+            return "low"
+        vague_markers = [
+            "用户聊了一些事情",
+            "进行了一些交流",
+            "表达了自己的想法",
+            "内容比较普通",
+            "没有明确",
+            "一些信息",
+        ]
+        if any(marker in content for marker in vague_markers):
+            return "low"
+        if len(text) < 18 and not key_facts:
+            return "low"
+        return "normal"
 
     def _payload_story_state(self, payload: dict[str, Any]) -> dict[str, Any]:
         raw = payload.get("story_state")

@@ -6,6 +6,7 @@ import re
 import sqlite3
 import threading
 import hashlib
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -374,16 +375,13 @@ class LayeredMemoryStore:
         query = (query or "").strip()
         if not query or top_k <= 0:
             return []
-        candidates: dict[int, MemoryEntry] = {}
-        for entry in self._search_like(query, session_id, top_k * 4, categories, include_global):
-            candidates[entry.id or 0] = entry
-        for entry in self._search_fts(query, session_id, top_k * 4, categories, include_global):
-            existing = candidates.get(entry.id or 0)
-            if existing:
-                existing.score += entry.score
-            else:
-                candidates[entry.id or 0] = entry
-        ranked = sorted(candidates.values(), key=lambda item: item.score, reverse=True)
+        like_entries = self._search_like(query, session_id, top_k * 6, categories, include_global)
+        fts_entries = self._search_fts(query, session_id, top_k * 6, categories, include_global)
+        ranked = self.fuse_retrieval_results(
+            [like_entries, fts_entries],
+            top_k=max(1, int(top_k)),
+            diversity_threshold=0.82,
+        )
         result = ranked[: max(1, int(top_k))]
         if result:
             self.mark_accessed([item.id for item in result if item.id is not None])
@@ -397,7 +395,7 @@ class LayeredMemoryStore:
         top_k: int = 6,
         categories: Iterable[str] | None = None,
         include_global: bool = True,
-            provider_id: str = "",
+        provider_id: str = "",
     ) -> list[MemoryEntry]:
         if not query_vector or top_k <= 0:
             return []
@@ -445,6 +443,41 @@ class LayeredMemoryStore:
             self.mark_accessed([item.id for item in result if item.id is not None])
         return result
 
+    def fuse_retrieval_results(
+        self,
+        groups: Iterable[list[MemoryEntry]],
+        *,
+        top_k: int = 8,
+        rrf_k: int = 60,
+        diversity_threshold: float = 0.82,
+    ) -> list[MemoryEntry]:
+        """Fuse ranked retrieval routes with reciprocal rank fusion and MMR-style dedup."""
+        fused = self._rrf_fuse(groups, limit=max(top_k * 4, top_k), rrf_k=rrf_k)
+        return self.diversify_entries(fused, limit=max(1, int(top_k)), threshold=diversity_threshold)
+
+    def diversify_entries(
+        self,
+        entries: list[MemoryEntry],
+        *,
+        limit: int,
+        threshold: float = 0.82,
+    ) -> list[MemoryEntry]:
+        selected: list[MemoryEntry] = []
+        for entry in entries:
+            if entry.id is None:
+                continue
+            duplicate = False
+            for chosen in selected:
+                if entry.category == chosen.category and self._content_similarity(entry.content, chosen.content) >= threshold:
+                    duplicate = True
+                    break
+            if duplicate:
+                continue
+            selected.append(entry)
+            if len(selected) >= max(1, int(limit)):
+                break
+        return selected
+
     def _search_like(
         self,
         query: str,
@@ -488,7 +521,7 @@ class LayeredMemoryStore:
             hit_count = sum(1 for term in terms if term.lower() in text)
             category_bonus = 0.2 if entry.category in {"locked", "core", "story_frame"} else 0.0
             entry.score = hit_count * 1.0 + entry.importance * 0.8 + entry.confidence * 0.2 + category_bonus
-        return entries
+        return sorted(entries, key=lambda item: item.score, reverse=True)
 
     def _search_fts(
         self,
@@ -652,7 +685,21 @@ class LayeredMemoryStore:
             "fts_available": self._fts_available,
             "vectors": self.count_vectors(session_id),
             "story_state": bool(self.get_story_state(session_id)),
+            "low_quality": self.count_low_quality_memories(session_id),
         }
+
+    def count_low_quality_memories(self, session_id: str = "") -> int:
+        params: list[Any] = []
+        filters = ["enabled=1", "metadata_json LIKE ?"]
+        params.append('%"summary_quality": "low"%')
+        if session_id:
+            filters.append("(session_id=? OR session_id='')")
+            params.append(session_id or "")
+        row = self.conn.execute(
+            f"SELECT COUNT(*) AS c FROM memory_entries WHERE {' AND '.join(filters)}",
+            params,
+        ).fetchone()
+        return int(row["c"] if row else 0)
 
     def export_memories(self, session_id: str, category: str | None = None) -> list[dict[str, Any]]:
         entries = self.list_memories(session_id, category=category, limit=500, include_global=True)
@@ -792,6 +839,68 @@ class LayeredMemoryStore:
                 )
             self.conn.commit()
 
+    def maintain_memories(
+        self,
+        session_id: str = "",
+        *,
+        stale_days: int = 60,
+        disable_below_importance: float = 0.18,
+        preview: bool = True,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        cutoff = datetime.now() - timedelta(days=max(1, int(stale_days)))
+        params: list[Any] = []
+        filters = ["enabled=1", "locked=0", "source!='manual'"]
+        if session_id:
+            filters.append("(session_id=? OR session_id='')")
+            params.append(session_id or "")
+        rows = self.conn.execute(
+            f"""
+            SELECT * FROM memory_entries
+            WHERE {' AND '.join(filters)}
+            ORDER BY updated_at ASC
+            LIMIT ?
+            """,
+            (*params, max(1, int(limit))),
+        ).fetchall()
+        candidates: list[MemoryEntry] = []
+        for row in rows:
+            entry = self._row_to_entry(row)
+            updated_at = self._parse_iso(entry.updated_at or entry.created_at)
+            if not updated_at or updated_at > cutoff:
+                continue
+            quality = str((entry.metadata or {}).get("summary_quality") or "")
+            if entry.access_count > 0 and quality != "low":
+                continue
+            candidates.append(entry)
+        disabled = 0
+        decayed = 0
+        if not preview:
+            with self._lock:
+                for entry in candidates:
+                    if entry.id is None:
+                        continue
+                    new_importance = max(0.0, entry.importance - (0.15 if entry.metadata.get("summary_quality") == "low" else 0.08))
+                    if new_importance <= disable_below_importance:
+                        self.conn.execute("UPDATE memory_entries SET enabled=0, updated_at=? WHERE id=?", (now_iso(), entry.id))
+                        self.conn.execute("DELETE FROM memory_vectors WHERE memory_id=?", (entry.id,))
+                        self._delete_fts(entry.id)
+                        disabled += 1
+                    else:
+                        self.conn.execute(
+                            "UPDATE memory_entries SET importance=?, updated_at=? WHERE id=?",
+                            (new_importance, now_iso(), entry.id),
+                        )
+                        decayed += 1
+                self.conn.commit()
+        return {
+            "preview": preview,
+            "candidates": len(candidates),
+            "disabled": disabled,
+            "decayed": decayed,
+            "ids": [entry.id for entry in candidates[:20] if entry.id is not None],
+        }
+
     def _upsert_fts(self, row_id: int, title: str, content: str, tags: str) -> None:
         if not self._fts_available:
             return
@@ -864,6 +973,33 @@ class LayeredMemoryStore:
         return value if isinstance(value, type(default)) else default
 
     @classmethod
+    def _rrf_fuse(
+        cls,
+        groups: Iterable[list[MemoryEntry]],
+        *,
+        limit: int,
+        rrf_k: int = 60,
+    ) -> list[MemoryEntry]:
+        entries: dict[int, MemoryEntry] = {}
+        scores: dict[int, float] = {}
+        for group in groups:
+            for rank, entry in enumerate(group or [], start=1):
+                if entry.id is None:
+                    continue
+                memory_id = int(entry.id)
+                entries.setdefault(memory_id, entry)
+                scores[memory_id] = scores.get(memory_id, 0.0) + 1.0 / (max(1, int(rrf_k)) + rank)
+        ranked: list[MemoryEntry] = []
+        for memory_id, entry in entries.items():
+            category_bonus = 0.08 if entry.category in {"core", "story_frame", "locked"} else 0.0
+            access_bonus = min(max(entry.access_count, 0), 20) * 0.005
+            lock_bonus = 0.2 if entry.locked else 0.0
+            entry.score = scores.get(memory_id, 0.0) * 100.0 + entry.importance * 0.35 + entry.confidence * 0.12 + category_bonus + access_bonus + lock_bonus
+            ranked.append(entry)
+        ranked.sort(key=lambda item: item.score, reverse=True)
+        return ranked[: max(1, int(limit))]
+
+    @classmethod
     def _content_similarity(cls, left: str, right: str) -> float:
         left = re.sub(r"\s+", "", left or "")
         right = re.sub(r"\s+", "", right or "")
@@ -878,6 +1014,15 @@ class LayeredMemoryStore:
         if not left_set or not right_set:
             return 0.0
         return len(left_set & right_set) / len(left_set | right_set)
+
+    @staticmethod
+    def _parse_iso(value: str) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
 
     @staticmethod
     def _char_ngrams(text: str, n: int = 3) -> set[str]:
