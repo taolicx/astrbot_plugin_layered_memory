@@ -23,49 +23,25 @@
 
 ## 常用命令
 
+正常使用不需要靠指令操控。插件会自动捕获对话、整理记忆、召回相关背景、维护剧情状态。下面几个命令只是维护入口：
+
 ```text
 /rmem status
-/rmem search <关键词> [数量]
-/rmem view [分类|all] [数量]
-/rmem core <内容>
-/rmem memo <内容>
-/rmem lock <内容>
-/rmem log <内容>
-/rmem frame <内容>
-/rmem story <内容>
-/rmem add <分类> <内容>
-/rmem edit <id> <新内容>
-/rmem delete <id>
-/rmem clear [分类|all]
+/rmem remember <内容>
+/rmem forget <id>
 /rmem summarize
-/rmem export [分类|all]
-/rmem rebuild-index
-/rmem rebuild-vectors [数量]
-/rmem state
+/rmem rebuild [数量]
 ```
 
-分类可用：`core`、`memo`、`locked`、`log`、`story_frame`、`story_summary`，也支持中文别名如“核心记忆”“备忘录”“锁定”“剧情框架”“剧情总结”。
+旧的细分命令仍作为高级/兼容入口保留，但默认不用学，也不用日常操作。
 
 ## 命令说明
 
 - `/rmem status`：查看当前会话的记忆数量、待整理消息、FTS、语义向量和剧情状态。
-- `/rmem search <关键词> [数量]`：按关键词搜索当前会话记忆。
-- `/rmem view [分类|all] [数量]`：查看某类或全部记忆。
-- `/rmem core <内容>`：手动添加核心记忆。
-- `/rmem memo <内容>`：手动添加备忘录。
-- `/rmem lock <内容>`：手动添加锁定记忆，会以更高优先级注入。
-- `/rmem log <内容>`：手动添加记忆日志。
-- `/rmem frame <内容>`：手动添加剧情框架。
-- `/rmem story <内容>`：手动添加剧情总结。
-- `/rmem add <分类> <内容>`：按指定分类添加记忆。
-- `/rmem edit <id> <新内容>`：修改指定记忆，并自动重建该条向量索引。
-- `/rmem delete <id>`：删除指定记忆和对应向量索引。
-- `/rmem clear [分类|all]`：清空当前会话某类或全部记忆；清空全部时也会清空剧情状态。
+- `/rmem remember <内容>`：手动补充一条重要记忆，通常只有自动整理漏掉时才用。
+- `/rmem forget <id>`：删除一条不想保留的记忆。
 - `/rmem summarize`：立即整理当前会话未整理消息。
-- `/rmem export [分类|all]`：导出 JSON 到配置目录，默认在 `D:/创建文件/astrbot_layered_memory_exports`。
-- `/rmem rebuild-index`：重建 SQLite FTS 检索索引。
-- `/rmem rebuild-vectors [数量]`：为缺失或 provider 不一致的记忆补建语义向量。
-- `/rmem state`：查看当前会话的结构化剧情状态。
+- `/rmem rebuild [数量]`：重建 SQLite FTS 检索索引，并为缺失或 provider 不一致的记忆补建语义向量。
 
 ## 默认配置可以直接用吗
 

@@ -3,7 +3,7 @@ display_name: 分层长期记忆与剧情延续
 author: Codex
 description: 为 AstrBot 提供分层长期记忆、语义向量召回、自动去重合并、结构化剧情状态和剧情总结。
 repo: "https://github.com/taolicx/astrbot_plugin_layered_memory"
-version: 0.2.0
+version: 0.2.1
 category: AI 增强
 tags:
   - 长期记忆
@@ -12,19 +12,12 @@ tags:
   - 智能回忆
   - 语义召回
 help: |
+  分层记忆默认自动工作，通常不用手动操作。
   /rmem status - 查看状态
-  /rmem search <关键词> [数量] - 搜索记忆
-  /rmem view [分类|all] [数量] - 查看记忆
-  /rmem core|memo|lock|log|frame|story <内容> - 手动添加分层记忆
-  /rmem add <分类> <内容> - 手动添加指定分类
-  /rmem edit <id> <新内容> - 修改记忆
-  /rmem delete <id> - 删除记忆
-  /rmem clear [分类|all] - 清空当前会话记忆
+  /rmem remember <内容> - 手动补充一条重要记忆
+  /rmem forget <id> - 删除一条记忆
   /rmem summarize - 立即整理当前会话
-  /rmem export [分类|all] - 导出 JSON
-  /rmem rebuild-index - 重建检索索引
-  /rmem rebuild-vectors [数量] - 补建语义向量索引
-  /rmem state - 查看结构化剧情状态
+  /rmem rebuild [数量] - 重建检索索引并补建语义向量
 support_platforms:
   - aiocqhttp
   - telegram

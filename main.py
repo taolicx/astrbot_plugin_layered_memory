@@ -89,7 +89,7 @@ def _plain(text: str) -> str:
     PLUGIN_NAME,
     "Codex",
     "分层长期记忆与剧情延续插件：核心记忆、备忘录、锁定记忆、记忆日志、智能回忆、剧情框架与剧情总结。",
-    "0.2.0",
+    "0.2.1",
 )
 class LayeredMemoryPlugin(Star):
     def __init__(self, context: Context, config: dict[str, Any]):
@@ -332,6 +332,12 @@ class LayeredMemoryPlugin(Star):
         yield event.plain_result(f"已添加记忆 #{memory_id}。")
 
     @admin_permission
+    @rmem.command("remember")
+    async def remember(self, event: AstrMessageEvent, content: str) -> AsyncGenerator[MessageEventResult, None]:
+        memory_id = self._manual_add(event, "core", content, importance=0.85)
+        yield event.plain_result(f"已记住 #{memory_id}。")
+
+    @admin_permission
     @rmem.command("core")
     async def add_core(self, event: AstrMessageEvent, content: str) -> AsyncGenerator[MessageEventResult, None]:
         memory_id = self._manual_add(event, "core", content)
@@ -384,6 +390,12 @@ class LayeredMemoryPlugin(Star):
         yield event.plain_result("已删除。" if ok else "没有找到这条记忆。")
 
     @admin_permission
+    @rmem.command("forget")
+    async def forget(self, event: AstrMessageEvent, memory_id: int) -> AsyncGenerator[MessageEventResult, None]:
+        ok = self.store.delete_memory(int(memory_id))
+        yield event.plain_result("已忘记。" if ok else "没有找到这条记忆。")
+
+    @admin_permission
     @rmem.command("clear")
     async def clear(self, event: AstrMessageEvent, category: str = "all") -> AsyncGenerator[MessageEventResult, None]:
         normalized = None if category in {"all", "全部", "*"} else normalize_category(category)
@@ -423,6 +435,23 @@ class LayeredMemoryPlugin(Star):
         yield event.plain_result(f"已安排 {scheduled} 条记忆补建向量索引。")
 
     @admin_permission
+    @rmem.command("rebuild")
+    async def rebuild(self, event: AstrMessageEvent, limit: int = 500) -> AsyncGenerator[MessageEventResult, None]:
+        index_count = self.store.rebuild_index()
+        provider = self._get_embedding_provider()
+        if provider is None:
+            yield event.plain_result(f"检索索引已重建：{index_count} 条。当前没有 Embedding Provider，语义向量保持降级模式。")
+            return
+        provider_id = self._provider_id(provider)
+        entries = self.store.vector_missing_entries(limit=max(1, min(2000, int(limit or 500))), provider_id=provider_id)
+        scheduled = 0
+        for entry in entries:
+            if entry.id is not None:
+                self._schedule_vector_index(entry.id, entry)
+                scheduled += 1
+        yield event.plain_result(f"检索索引已重建：{index_count} 条；已安排 {scheduled} 条记忆补建语义向量。")
+
+    @admin_permission
     @rmem.command("state")
     async def story_state(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         text = format_story_state(self.store.get_story_state(getattr(event, "unified_msg_origin", "") or ""), max_chars=5000)
@@ -446,19 +475,12 @@ class LayeredMemoryPlugin(Star):
         yield event.plain_result(
             "\n".join(
                 [
+                    "分层记忆默认自动工作，通常不用手动操作。",
                     "/rmem status - 查看状态",
-                    "/rmem search <关键词> [数量] - 搜索记忆",
-                    "/rmem view [分类|all] [数量] - 查看记忆",
-                    "/rmem core|memo|lock|log|frame|story <内容> - 手动添加分层记忆",
-                    "/rmem add <分类> <内容> - 手动添加指定分类",
-                    "/rmem edit <id> <新内容> - 修改记忆",
-                    "/rmem delete <id> - 删除记忆",
-                    "/rmem clear [分类|all] - 清空当前会话记忆",
+                    "/rmem remember <内容> - 手动补充一条重要记忆",
+                    "/rmem forget <id> - 删除一条记忆",
                     "/rmem summarize - 立即整理当前会话",
-                    "/rmem export [分类|all] - 导出 JSON",
-                    "/rmem rebuild-index - 重建检索索引",
-                    "/rmem rebuild-vectors [数量] - 补建向量索引",
-                    "/rmem state - 查看结构化剧情状态",
+                    "/rmem rebuild [数量] - 重建检索索引并补建语义向量",
                 ]
             )
         )
